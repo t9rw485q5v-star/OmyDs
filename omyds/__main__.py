@@ -9,7 +9,15 @@ from . import storage
 def main():
     cfg = load_config()
     api = cfg["api"]
-    system_prompt = cfg["chat"]["system_prompt"]
+    
+    # === 读取系统提示词：优先用 agent.md，否则用 config.toml ===
+    agent_md_path = Path(__file__).parent.parent / "agent.md"
+    if agent_md_path.exists():
+        with open(agent_md_path, "r", encoding="utf-8") as f:
+            system_prompt = f.read().strip()
+    else:
+        system_prompt = cfg["chat"]["system_prompt"]
+
 
     # === 1. Longterm-memory(for v0.1.3) ===
     # 如果你想写点什么让 OmyDs 永远记住，写在 ~/.omyds/memory.md 里
@@ -112,7 +120,11 @@ def main():
             messages.pop() # 回滚用户刚说的话，防止脏数据
             continue
 
-        content = reply.choices[0].message.content
+        raw_content = reply.choices[0].message.content
+
+        # === 让 storage 去检查并保存记忆，返回清理后的文本 ===
+        content = storage.extract_and_save_memory(raw_content)
+
         print(f"\nOmyDs > {content}")
         
         # 把 AI 的话也加入完整历史

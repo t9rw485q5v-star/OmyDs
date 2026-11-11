@@ -8,3 +8,4 @@ hello.py
 .omyds/
 *.json
 .omyds_history
+agent.md
