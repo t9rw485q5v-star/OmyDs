@@ -1,6 +1,6 @@
 from openai import OpenAI
 from .config import load_config
-
+from prompt_toolkit import prompt
 
 def main():
     cfg = load_config()
@@ -17,7 +17,7 @@ def main():
 
     while True:
         try:
-            user_input = input("\n你 > ").strip()
+            user_input = prompt(" >> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
