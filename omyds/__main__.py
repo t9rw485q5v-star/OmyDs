@@ -11,8 +11,8 @@ def main():
     api = cfg["api"]
     system_prompt = cfg["chat"]["system_prompt"]
 
-    # === 1. 长期记忆接口 (v0.1.3 预留) ===
-    # 如果你想写点什么让 OmyDs 永远记住，就写在 ~/.omyds/memory.md 里
+    # === 1. Longterm-memory(for v0.1.3) ===
+    # 如果你想写点什么让 OmyDs 永远记住，写在 ~/.omyds/memory.md 里
     memory_file = Path.home() / ".omyds" / "memory.md"
     if memory_file.exists():
         with open(memory_file, "r", encoding="utf-8") as f:
@@ -41,7 +41,7 @@ def main():
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
-                # 选择了老会话，注意这里用 sessions[idx - 1] 确保名字完全一致（包括空格）
+                # 选择了老会话，确保名字完全一致
                 session_name = sessions[idx - 1]
                 messages = storage.load_session(session_name)
                 print(f"已加载会话：{session_name}")
@@ -65,13 +65,12 @@ def main():
     history_file = Path.home() / ".omyds_history"
     session = PromptSession(history=FileHistory(str(history_file)))
 
+    # === 3. 聊天主循环 ===
     while True:
         try:
             user_input = session.prompt("\n >> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            # 如果是 Ctrl+C 强退，为了防丢数据，可以在这里跳出循环
-            # 但为简单起见，我们直接 break，后面统一处理保存逻辑
             break
 
         if not user_input:
@@ -80,23 +79,46 @@ def main():
         if user_input.lower() in ("exit", "quit"):
             break
 
+        # 把用户的话加入完整历史
         messages.append({"role": "user", "content": user_input})
 
+        # === v0.1.2.11 补丁：上下文截断 ===
+        total_chars = sum(len(m["content"]) for m in messages)
+        MAX_CHARS = 8000
+        
+        if total_chars > MAX_CHARS:
+            keep_chars = 0
+            keep_from_index = len(messages)
+            for i in range(len(messages) - 1, 0, -1):
+                keep_chars += len(messages[i]["content"])
+                if keep_chars > 6000:
+                    keep_from_index = i
+                    break
+            
+            # 生成临时列表
+            api_messages = [messages[0]] + messages[keep_from_index:]
+            ##print(" \033[33m[系统提示：历史对话过长，本次请求已自动截断旧消息，但本地记录依然完整]\033[0m")
+        else:
+            api_messages = messages
+
+        # 发起 API 请求
         try:
             reply = client.chat.completions.create(
                 model=api["model"],
-                messages=messages,
+                messages=api_messages, 
             )
         except Exception as e:
             print(f"[API 错误] {e}")
-            messages.pop() # 回滚
+            messages.pop() # 回滚用户刚说的话，防止脏数据
             continue
 
         content = reply.choices[0].message.content
         print(f"\nOmyDs > {content}")
+        
+        # 把 AI 的话也加入完整历史
         messages.append({"role": "assistant", "content": content})
 
-    # === 3. 退出时的保存逻辑 ===
+    # === 4. 退出时的保存逻辑 ===
     print("\n[退出]")
     
     # 如果除了 system 消息之外，没有任何对话，就不保存了
@@ -115,10 +137,10 @@ def main():
     else:
         save_choice = input("是否保存本次对话？[y/N] ").strip().lower()
         if save_choice == 'y':
-             new_name = input("给这次对话起个名字：").strip()
-             if new_name:
+            new_name = input("给这次对话起个名字：").strip()
+            if new_name:
                 storage.save_session(new_name, messages)
-                print("已保存。")  
+                print("已保存。")
         else:
             print("已放弃保存。")
 
