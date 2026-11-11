@@ -1,0 +1,8 @@
+[api]
+# 把你的 DeepSeek API key 填在这里
+key = "sk-你的key"
+base_url = "https://api.deepseek.com"
+model = "deepseek-flash"
+
+[chat]
+system_prompt = "你是 OmyDs，一个简洁、直接的终端聊天助手。"
