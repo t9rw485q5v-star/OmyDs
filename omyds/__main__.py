@@ -5,6 +5,7 @@ from prompt_toolkit.history import FileHistory
 from pathlib import Path
 from .config import load_config, get_system_prompt
 from . import storage
+from .security import validate_path
 
 def main():
     cfg = load_config()
@@ -80,6 +81,41 @@ def main():
 
         if user_input.lower() in ("exit", "quit"):
             break
+        
+        # /help（v0.1.4）
+        if user_input.lower() == "/help":
+            print("\n\033[36m=== OmyDs 帮助 ===\033[0m")
+            print("  /read <路径>  读取文件并分析（支持绝对路径，越界需授权）")
+            print("  exit/quit     退出聊天")
+            print("  其他任意文字  直接与 AI 聊天\n")
+            continue
+
+        # 拦截 /read 指令（v0.1.4）
+        if user_input.startswith("/read"):
+            file_path_str = user_input[6:].strip()
+            try:
+                # 1. call the sandbox validation path
+                safe_path = validate_path(file_path_str)
+
+                # 2. read file
+                if safe_path.is_file():
+                    with open(safe_path, "r", encoding="utf-8")as f:
+                        file_content = f.read()
+
+                    # 3.inject the file_content
+                    injected_msg = f"我读取了本地文件{file_path_str}, 内容如下: \n```\n{file_content}\n```\n请帮我分析这个文件。"
+
+                    # remind
+                    print(f" \033[32m[系统：已成功读取 {file_path_str}，大小 {len(file_content)} 字符]\033[0m")
+
+                    # reject
+                    user_input = injected_msg
+                else:
+                    print(f" \033[31m[系统：路径 {file_path_str} 不是文件或不存在]\033[0m")
+                    continue
+            except PermissionError as e:
+                print(f" \033[31m[系统拦截：{e}]\033[0m")
+                continue
 
         # 把用户的话加入完整历史
         messages.append({"role": "user", "content": user_input})
