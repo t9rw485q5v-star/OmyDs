@@ -119,7 +119,7 @@ def main():
         # === 让 storage 去检查并保存记忆，返回清理后的文本 ===
         content = storage.extract_and_save_memory(raw_content)
 
-        print(f"\nOmyDs > {content}")
+        print(f"\n\033[34mOmyDs > {content}\033[0m")
         
         # 把 AI 的话也加入完整历史
         messages.append({"role": "assistant", "content": content})

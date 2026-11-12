@@ -10,7 +10,6 @@ def list_sessions() -> list[str]:
     """列出所有已保存的对话"""
     if not SESSIONS_DIR.exists():
         return []
-    # 用列表推导式，把所有的 json 文件提取出来
     return [p.stem for p in SESSIONS_DIR.glob("*.json")]
 
 def load_session(name: str) -> list:
@@ -18,7 +17,6 @@ def load_session(name: str) -> list:
     file_path = SESSIONS_DIR / f"{name}.json"
     if not file_path.exists():
         return []
-    # 先打开文件，再交给 json.load
     with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -26,27 +24,41 @@ def save_session(name: str, messages: list):
     """保存消息列表到文件"""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     file_path = SESSIONS_DIR / f"{name}.json"
-    # 写入 JSON，ensure_ascii=False 保证中文正常显示，indent=2 让文件排版好看
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(messages, f, ensure_ascii=False, indent=2)
 
 # 长期记忆(v0.1.3)
 def extract_and_save_memory(text: str) -> str:
-    """从 AI 的回复中提取 [MEMORY: ...]，保存并返回清理后的文本"""
-    pattern = r"\[MEMORY:\s*(.*?)\]"
-    match = re.search(pattern, text, re.DOTALL)
+    # 匹配 [] 或者 【】 包裹的 MEMORY:
+    pattern = r"[\[【]\s*MEMORY:\s*(.*?)\s*[\]】]"
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     
     if match:
         mem_content = match.group(1).strip()
-        # 写入文件
-        MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(MEMORY_FILE, "a", encoding="utf-8") as f:
-            f.write(f"- {mem_content}\n")
 
-        # 终端提示
-        print(f" \033[32m[系统：已更新长期记忆 -> {mem_content}]\033[0m")
+        # 如果提取出的是“无”、“没有”这种无效词，过滤掉
+        if mem_content in ["无", "没有", "none", "None", "无。", "暂无"]:
+            mem_content = ""
 
-        # 把标记从给用户看的文本中删掉
+        # 只有内容不为空，才进行写入
+        if mem_content:
+            MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            
+            # === 去重逻辑(v0.1.3.12) ===
+            existing_memories = ""
+            if MEMORY_FILE.exists():
+                with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+                    existing_memories = f.read()
+            
+            # 如果新的记忆内容已经在文件里了，就不写了
+            if mem_content not in existing_memories:
+                with open(MEMORY_FILE, "a", encoding="utf-8") as f:
+                    f.write(f"- {mem_content}\n")
+                print(f" \033[32m[系统：已更新长期记忆 -> {mem_content}]\033[0m")
+            # ====================
+            
+        # 无论是否写入，都要把标记从用户看到的文本里删掉
         cleaned_text = re.sub(pattern, "", text).strip()
         return cleaned_text
+        
     return text
