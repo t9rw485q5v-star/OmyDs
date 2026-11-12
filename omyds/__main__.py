@@ -1,3 +1,4 @@
+import re
 import sys
 import threading
 import time
@@ -9,6 +10,8 @@ from pathlib import Path
 from .config import load_config, get_system_prompt
 from . import storage
 from .security import validate_path
+from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
+
 
 class Spinner:
     def __init__(self, message="思考中 "):
@@ -29,19 +32,46 @@ class Spinner:
     def stop(self):
         self.stop_running.set()
         self.thread.join()
-        # 清除那一行 Spinner
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
+
+class CommandAutoSuggest(AutoSuggest):
+    """只对以 / 开头的命令进行历史补全，并包含默认预设"""
+    def get_suggestion(self, buffer, document):
+        text = document.text
+        if not text.startswith("/"):
+            return None
+            
+        # 预设的命令字典
+        default_commands = ["/read ", "/help ","/history"]
+        
+        # 1. 先在预设里找
+        for cmd in default_commands:
+            if cmd.startswith(text) and cmd != text:
+                return Suggestion(cmd[len(text):])
+                
+        # 2. 如果预设没有，再去历史记录里找
+        for string in reversed(buffer.history.get_strings()):
+            if string.startswith("/") and string.startswith(text) and string != text:
+                return Suggestion(string[len(text):])
+                
+        return None
+
+
+# === 只保存 / 命令的历史类(v0.1.4.12) ===
+class CommandOnlyHistory(FileHistory):
+    """只保存以 / 开头的命令，忽略普通聊天"""
+    def append_string(self, string):
+        if string.startswith("/") and string != "/":
+            super().append_string(string)
+
 def main():
     cfg = load_config()
-
     api = cfg["api"]
     system_prompt = get_system_prompt(cfg)
 
-
     # === 1. Longterm-memory(for v0.1.3) ===
-    # 如果你想写点什么让 OmyDs 永远记住，写在 ~/.omyds/memory.md 里
     memory_file = Path.home() / ".omyds" / "memory.md"
     if memory_file.exists():
         with open(memory_file, "r", encoding="utf-8") as f:
@@ -66,19 +96,15 @@ def main():
         session_name = None
         is_new_session = False
         
-        # 如果用户输入了数字
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(sessions):
-                # 选择了老会话，确保名字完全一致
                 session_name = sessions[idx - 1]
                 messages = storage.load_session(session_name)
                 print(f"已加载会话：{session_name}")
             else:
-                # 输入了 0 或者超出的数字，当作新建
                 is_new_session = True
         else:
-            # 瞎敲或者直接回车，当作新建
             is_new_session = True
     else:
         print("(无历史对话，直接新建)")
@@ -88,11 +114,14 @@ def main():
         session_name = None
         messages = [{"role": "system", "content": system_prompt}]
             
-    print(f"\n已进入对话。输入 exit 或 quit 退出。")
+    print(f"\n\033[36m=== 欢迎来到 OmyDs~ ===\033[0m\n已进入对话。输入 exit 或 quit 退出。（输入时可使用上下键/右方向键补全历史命令）")
 
-    # 初始化 prompt_toolkit (带有历史记录，防止按↑出不来)
+    # 初始化 prompt_toolkit（换用我们自定义的类）
     history_file = Path.home() / ".omyds_history"
-    session = PromptSession(history=FileHistory(str(history_file)))
+    session = PromptSession(
+        history=CommandOnlyHistory(str(history_file)),
+        auto_suggest=CommandAutoSuggest()
+    )
 
     # === 3. 聊天主循环 ===
     while True:
@@ -108,34 +137,39 @@ def main():
         if user_input.lower() in ("exit", "quit"):
             break
         
-        # /help（v0.1.4）
+        # /help
         if user_input.lower() == "/help":
             print("\n\033[36m=== OmyDs 帮助 ===\033[0m")
-            print("  /read <路径>  读取文件并分析（支持绝对路径，越界需授权）")
-            print("  exit/quit     退出聊天")
-            print("  其他任意文字  直接与 AI 聊天\n")
+            print("  /read <路径>          读取文件（如: /read README.md）")
+            print("  /read <路径> | <需求> 读取文件并要求 AI 处理（如: /read main.py | 帮我查错）")
+            print("  exit / quit           退出聊天")
+            print("  其他任意文字          直接与 AI 聊天\n")
             continue
 
-        # 拦截 /read 指令（v0.1.4）
-        if user_input.startswith("/read "):
-            # 解析路径和需求，用 "|" 分割
-            raw_args = user_input[6:].strip()
-            if "|" in raw_args:
-                file_path_str, user_prompt = raw_args.split("|", 1)
-                file_path_str = file_path_str.strip()
-                user_prompt = user_prompt.strip()
-            else:
-                file_path_str = raw_args
-                user_prompt = ""
-
+        # === 解析用户输入中任意位置的 /read 指令 (v0.1.4.12)===
+        # 匹配格式： /read 路径 [| 需求] 或者 /read 路径 （直到遇到换行或结尾）
+        read_pattern = r"/read\s+([^|\n]+)(?:\|\s*([^\n]+))?"
+        match = re.search(read_pattern, user_input)
+        
+        if match:
+            file_path_str = match.group(1).strip()
+            user_prompt = match.group(2).strip() if match.group(2) else ""
+            
+            # 把原本输入里的 /read... 去掉，剩下的就是用户的前言或后语
+            text_without_read = re.sub(read_pattern, "", user_input).strip()
+            
             try:
                 safe_path = validate_path(file_path_str)
                 if safe_path.is_file():
                     with open(safe_path, "r", encoding="utf-8") as f:
                         file_content = f.read()
                     
-                    # 组装成结构化的 file 标签
-                    injected_msg = f'<file path="{file_path_str}" bytes="{len(file_content)}">\n{file_content}\n</file>'
+                    # 重新组装消息
+                    injected_msg = ""
+                    if text_without_read:
+                        injected_msg += f"{text_without_read}\n\n"
+                        
+                    injected_msg += f'<file path="{file_path_str}" bytes="{len(file_content)}">\n{file_content}\n</file>'
                     
                     if user_prompt:
                         injected_msg += f"\n\n用户需求：{user_prompt}"
@@ -152,7 +186,7 @@ def main():
         # 把用户的话加入完整历史
         messages.append({"role": "user", "content": user_input})
 
-        # === v0.1.2.11 补丁：上下文截断 ===
+        # 上下文截断
         total_chars = sum(len(m["content"]) for m in messages)
         MAX_CHARS = 8000
         
@@ -165,13 +199,11 @@ def main():
                     keep_from_index = i
                     break
             
-            # 生成临时列表
             api_messages = [messages[0]] + messages[keep_from_index:]
-            ##print(" \033[33m[系统提示：历史对话过长，本次请求已自动截断旧消息，但本地记录依然完整]\033[0m")
         else:
             api_messages = messages
 
-        # 发起 API 请求, 加上Spinner
+        # 发起 API 请求
         spinner = Spinner()
         spinner.start()
         try:
@@ -179,32 +211,26 @@ def main():
                 model=api["model"],
                 messages=api_messages, 
             )
-            spinner.stop() # 成功后停止
+            spinner.stop()
         except Exception as e:
             spinner.stop() 
             print(f"[API 错误] {e}")
-            messages.pop() # 回滚用户刚说的话，防止脏数据
+            messages.pop()
             continue
 
         raw_content = reply.choices[0].message.content
-
-        # === 让 storage 去检查并保存记忆，返回清理后的文本 ===
         content = storage.extract_and_save_memory(raw_content)
 
         print(f"\n\033[34mOmyDs > {content}\033[0m")
-        
-        # 把 AI 的话也加入完整历史
         messages.append({"role": "assistant", "content": content})
 
     # === 4. 退出时的保存逻辑 ===
     print("\n[退出]")
     
-    # 如果除了 system 消息之外，没有任何对话，就不保存了
     if len(messages) <= 1:
         print("未产生对话，不保存。")
         return
 
-    # 如果是老会话，就问是否覆盖；如果是新会话，问是否保存并起名
     if not is_new_session:
         save_choice = input(f"是否覆盖保存到旧会话 '{session_name}'？[y/N] ").strip().lower()
         if save_choice == 'y':
