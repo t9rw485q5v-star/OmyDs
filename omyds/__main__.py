@@ -114,7 +114,7 @@ def main():
         session_name = None
         messages = [{"role": "system", "content": system_prompt}]
             
-    print(f"\n\033[36m=== 欢迎来到 OmyDs~ ===\033[0m\n已进入对话。输入 exit 或 quit 退出。（输入时可使用上下键/右方向键补全历史命令）")
+    print(f"\n\033[36m=== 欢迎来到 OmyDs~ ===\033[0m\n已进入对话。输入 exit 或 quit 退出。(使用 /help 指令寻求帮助)")
 
     # 初始化 prompt_toolkit（换用我们自定义的类）
     history_file = Path.home() / ".omyds_history"
@@ -140,10 +140,31 @@ def main():
         # /help
         if user_input.lower() == "/help":
             print("\n\033[36m=== OmyDs 帮助 ===\033[0m")
+            print("  /history              显示过往聊天的历史记录")
             print("  /read <路径>          读取文件（如: /read README.md）")
             print("  /read <路径> | <需求> 读取文件并要求 AI 处理（如: /read main.py | 帮我查错）")
             print("  exit / quit           退出聊天")
             print("  其他任意文字          直接与 AI 聊天\n")
+            continue
+
+        # 拦截 /history 指令
+        if user_input.lower() == "/history":
+            print("\n\033[36m=== 当前会话历史记录 ===\033[0m")
+            for msg in messages:
+                # 过滤掉最前面的 system prompt，里面全是设定和记忆，太长了
+                if msg["role"] == "system":
+                    continue
+                
+                role_name = "\033[34m你\033[0m" if msg["role"] == "user" else "\033[33mOmyDs\033[0m"
+                
+                # 用户发的内容里如果有 <file>，为了终端清爽，我们截断显示
+                content = msg["content"]
+                if len(content) > 200:
+                    content = content[:200] + "\n...(内容过长已截断，仅展示前 200 字)"
+                    
+                print(f"\n[{role_name}]:\n{content}")
+                
+            print("\n\033[36m======================\033[0m\n")
             continue
 
         # === 解析用户输入中任意位置的 /read 指令 (v0.1.4.12)===
