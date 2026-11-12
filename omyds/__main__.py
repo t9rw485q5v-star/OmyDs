@@ -3,20 +3,14 @@ from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from pathlib import Path
-from .config import load_config
+from .config import load_config, get_system_prompt
 from . import storage
 
 def main():
     cfg = load_config()
+
     api = cfg["api"]
-    
-    # === 读取系统提示词：优先用 agent.md，否则用 config.toml ===
-    agent_md_path = Path(__file__).parent.parent / "agent.md"
-    if agent_md_path.exists():
-        with open(agent_md_path, "r", encoding="utf-8") as f:
-            system_prompt = f.read().strip()
-    else:
-        system_prompt = cfg["chat"]["system_prompt"]
+    system_prompt = get_system_prompt(cfg)
 
 
     # === 1. Longterm-memory(for v0.1.3) ===
