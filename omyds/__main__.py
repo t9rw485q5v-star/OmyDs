@@ -1,4 +1,7 @@
 import sys
+import threading
+import time
+import itertools
 from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -6,6 +9,29 @@ from pathlib import Path
 from .config import load_config, get_system_prompt
 from . import storage
 from .security import validate_path
+
+class Spinner:
+    def __init__(self, message="思考中 "):
+        self.spinner = itertools.cycle(['|', '/', '-', '\\'])
+        self.stop_running = threading.Event()
+        self.thread = threading.Thread(target=self._spin)
+        self.message = message
+
+    def _spin(self):
+        while not self.stop_running.is_set():
+            sys.stdout.write(f"\r\033[36m{self.message} {next(self.spinner)}\033[0m")
+            sys.stdout.flush()
+            time.sleep(0.1)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_running.set()
+        self.thread.join()
+        # 清除那一行 Spinner
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
 
 def main():
     cfg = load_config()
@@ -91,27 +117,33 @@ def main():
             continue
 
         # 拦截 /read 指令（v0.1.4）
-        if user_input.startswith("/read"):
-            file_path_str = user_input[6:].strip()
+        if user_input.startswith("/read "):
+            # 解析路径和需求，用 "|" 分割
+            raw_args = user_input[6:].strip()
+            if "|" in raw_args:
+                file_path_str, user_prompt = raw_args.split("|", 1)
+                file_path_str = file_path_str.strip()
+                user_prompt = user_prompt.strip()
+            else:
+                file_path_str = raw_args
+                user_prompt = ""
+
             try:
-                # 1. call the sandbox validation path
                 safe_path = validate_path(file_path_str)
-
-                # 2. read file
                 if safe_path.is_file():
-                    with open(safe_path, "r", encoding="utf-8")as f:
+                    with open(safe_path, "r", encoding="utf-8") as f:
                         file_content = f.read()
-
-                    # 3.inject the file_content
-                    injected_msg = f"我读取了本地文件{file_path_str}, 内容如下: \n```\n{file_content}\n```\n请帮我分析这个文件。"
-
-                    # remind
-                    print(f" \033[32m[系统：已成功读取 {file_path_str}，大小 {len(file_content)} 字符]\033[0m")
-
-                    # reject
+                    
+                    # 组装成结构化的 file 标签
+                    injected_msg = f'<file path="{file_path_str}" bytes="{len(file_content)}">\n{file_content}\n</file>'
+                    
+                    if user_prompt:
+                        injected_msg += f"\n\n用户需求：{user_prompt}"
+                    
+                    print(f" \033[32m[系统：已成功读取 {file_path_str}]\033[0m")
                     user_input = injected_msg
                 else:
-                    print(f" \033[31m[系统：路径 {file_path_str} 不是文件或不存在]\033[0m")
+                    print(f" \033[31m[系统：路径不是文件或不存在]\033[0m")
                     continue
             except PermissionError as e:
                 print(f" \033[31m[系统拦截：{e}]\033[0m")
@@ -139,13 +171,17 @@ def main():
         else:
             api_messages = messages
 
-        # 发起 API 请求
+        # 发起 API 请求, 加上Spinner
+        spinner = Spinner()
+        spinner.start()
         try:
             reply = client.chat.completions.create(
                 model=api["model"],
                 messages=api_messages, 
             )
+            spinner.stop() # 成功后停止
         except Exception as e:
+            spinner.stop() 
             print(f"[API 错误] {e}")
             messages.pop() # 回滚用户刚说的话，防止脏数据
             continue
