@@ -3,15 +3,16 @@ import sys
 import threading
 import time
 import itertools
+import json
 from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from pathlib import Path
 from .config import load_config, get_system_prompt
 from . import storage
-from .security import validate_path
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
-
+from .security import OutOfSandboxError
+from omyds.tools import AVAILABLE_TOOLS
 
 class Spinner:
     def __init__(self, message="思考中 "):
@@ -35,33 +36,21 @@ class Spinner:
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
-
 class CommandAutoSuggest(AutoSuggest):
-    """只对以 / 开头的命令进行历史补全，并包含默认预设"""
     def get_suggestion(self, buffer, document):
         text = document.text
         if not text.startswith("/"):
             return None
-            
-        # 预设的命令字典
-        default_commands = ["/read ", "/help ","/history"]
-        
-        # 1. 先在预设里找
+        default_commands = ["/help ", "/history"]
         for cmd in default_commands:
             if cmd.startswith(text) and cmd != text:
                 return Suggestion(cmd[len(text):])
-                
-        # 2. 如果预设没有，再去历史记录里找
         for string in reversed(buffer.history.get_strings()):
             if string.startswith("/") and string.startswith(text) and string != text:
                 return Suggestion(string[len(text):])
-                
         return None
 
-
-# === 只保存 / 命令的历史类(v0.1.4.12) ===
 class CommandOnlyHistory(FileHistory):
-    """只保存以 / 开头的命令，忽略普通聊天"""
     def append_string(self, string):
         if string.startswith("/") and string != "/":
             super().append_string(string)
@@ -71,7 +60,6 @@ def main():
     api = cfg["api"]
     system_prompt = get_system_prompt(cfg)
 
-    # === 1. Longterm-memory(for v0.1.3) ===
     memory_file = Path.home() / ".omyds" / "memory.md"
     if memory_file.exists():
         with open(memory_file, "r", encoding="utf-8") as f:
@@ -81,9 +69,8 @@ def main():
 
     client = OpenAI(api_key=api["key"], base_url=api["base_url"])
 
-    # === 2. 选择或新建会话 ===
     sessions = storage.list_sessions()
-    print("--- OmyDs v0.1.2 ---")
+    print("--- OmyDs v0.1.6 ---")
     
     if sessions:
         print("已有的对话：")
@@ -116,14 +103,26 @@ def main():
             
     print(f"\n\033[36m=== 欢迎来到 OmyDs~ ===\033[0m\n已进入对话。输入 exit 或 quit 退出。(使用 /help 指令寻求帮助)")
 
-    # 初始化 prompt_toolkit（换用我们自定义的类）
     history_file = Path.home() / ".omyds_history"
     session = PromptSession(
         history=CommandOnlyHistory(str(history_file)),
         auto_suggest=CommandAutoSuggest()
     )
 
-    # === 3. 聊天主循环 ===
+    # 记录已授权的路径，避免同一操作反复询问
+    authorized_paths = set()
+
+    api_tools = []
+    for tool in AVAILABLE_TOOLS:
+        api_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters
+            }
+        })
+
     while True:
         try:
             user_input = session.prompt("\n >> ").strip()
@@ -137,115 +136,164 @@ def main():
         if user_input.lower() in ("exit", "quit"):
             break
         
-        # /help
         if user_input.lower() == "/help":
             print("\n\033[36m=== OmyDs 帮助 ===\033[0m")
             print("  /history              显示过往聊天的历史记录")
-            print("  /read <路径>          读取文件（如: /read README.md）")
-            print("  /read <路径> | <需求> 读取文件并要求 AI 处理（如: /read main.py | 帮我查错）")
             print("  exit / quit           退出聊天")
-            print("  其他任意文字          直接与 AI 聊天\n")
+            print("  \033[33m提示: 直接用自然语言让 AI 读文件或改代码即可。\033[0m\n")
             continue
 
-        # 拦截 /history 指令
         if user_input.lower() == "/history":
             print("\n\033[36m=== 当前会话历史记录 ===\033[0m")
             for msg in messages:
-                # 过滤掉最前面的 system prompt，里面全是设定和记忆，太长了
-                if msg["role"] == "system":
-                    continue
-                
-                role_name = "\033[34m你\033[0m" if msg["role"] == "user" else "\033[33mOmyDs\033[0m"
-                
-                # 用户发的内容里如果有 <file>，为了终端清爽，我们截断显示
-                content = msg["content"]
-                if len(content) > 200:
-                    content = content[:200] + "\n...(内容过长已截断，仅展示前 200 字)"
-                    
-                print(f"\n[{role_name}]:\n{content}")
-                
+                if isinstance(msg, dict):
+                    if msg.get("role") == "system": continue
+                    content = msg.get("content")
+                    role = msg.get("role")
+                else:
+                    if getattr(msg, "role", "") == "system": continue
+                    content = getattr(msg, "content", None)
+                    role = getattr(msg, "role", "")
+
+                if content:
+                    role_name = "\033[34m你\033[0m" if role == "user" else "\033[33mOmyDs\033[0m"
+                    if len(content) > 200:
+                        content = content[:200] + "\n...(内容过长已截断)"
+                    print(f"\n[{role_name}]:\n{content}")
             print("\n\033[36m======================\033[0m\n")
             continue
 
-        # === 解析用户输入中任意位置的 /read 指令 (v0.1.4.12)===
-        # 匹配格式： /read 路径 [| 需求] 或者 /read 路径 （直到遇到换行或结尾）
-        read_pattern = r"/read\s+([^|\n]+)(?:\|\s*([^\n]+))?"
-        match = re.search(read_pattern, user_input)
-        
-        if match:
-            file_path_str = match.group(1).strip()
-            user_prompt = match.group(2).strip() if match.group(2) else ""
-            
-            # 把原本输入里的 /read... 去掉，剩下的就是用户的前言或后语
-            text_without_read = re.sub(read_pattern, "", user_input).strip()
-            
-            try:
-                safe_path = validate_path(file_path_str)
-                if safe_path.is_file():
-                    with open(safe_path, "r", encoding="utf-8") as f:
-                        file_content = f.read()
-                    
-                    # 重新组装消息
-                    injected_msg = ""
-                    if text_without_read:
-                        injected_msg += f"{text_without_read}\n\n"
-                        
-                    injected_msg += f'<file path="{file_path_str}" bytes="{len(file_content)}">\n{file_content}\n</file>'
-                    
-                    if user_prompt:
-                        injected_msg += f"\n\n用户需求：{user_prompt}"
-                    
-                    print(f" \033[32m[系统：已成功读取 {file_path_str}]\033[0m")
-                    user_input = injected_msg
-                else:
-                    print(f" \033[31m[系统：路径不是文件或不存在]\033[0m")
-                    continue
-            except PermissionError as e:
-                print(f" \033[31m[系统拦截：{e}]\033[0m")
-                continue
-
-        # 把用户的话加入完整历史
+        # 保存用户输入前的消息长度，用于遇到 400 错误时回滚
+        msg_len_before_input = len(messages)
         messages.append({"role": "user", "content": user_input})
 
-        # 上下文截断
-        total_chars = sum(len(m["content"]) for m in messages)
-        MAX_CHARS = 8000
-        
-        if total_chars > MAX_CHARS:
-            keep_chars = 0
-            keep_from_index = len(messages)
-            for i in range(len(messages) - 1, 0, -1):
-                keep_chars += len(messages[i]["content"])
-                if keep_chars > 6000:
-                    keep_from_index = i
-                    break
+        # === 内层循环：处理 Agent 思考和工具调用 ===
+        api_error_occurred = False
+        while True:
+            # 上下文截断
+            total_chars = 0
+            for m in messages:
+                if isinstance(m, dict):
+                    total_chars += len(m.get("content") or "")
+                else:
+                    total_chars += len(getattr(m, "content", "") or "")
             
-            api_messages = [messages[0]] + messages[keep_from_index:]
-        else:
-            api_messages = messages
+            MAX_CHARS = 8000
+            if total_chars > MAX_CHARS:
+                keep_chars = 0
+                keep_from_index = len(messages)
+                for i in range(len(messages) - 1, 0, -1):
+                    m = messages[i]
+                    m_chars = len(m.get("content") or "") if isinstance(m, dict) else len(getattr(m, "content", "") or "")
+                    keep_chars += m_chars
+                    if keep_chars > 6000:
+                        keep_from_index = i
+                        break
+                api_messages = [messages[0]] + messages[keep_from_index:]
+            else:
+                api_messages = messages
 
-        # 发起 API 请求
-        spinner = Spinner()
-        spinner.start()
-        try:
-            reply = client.chat.completions.create(
-                model=api["model"],
-                messages=api_messages, 
-            )
-            spinner.stop()
-        except Exception as e:
-            spinner.stop() 
-            print(f"[API 错误] {e}")
-            messages.pop()
-            continue
+            spinner = Spinner()
+            spinner.start()
+            try:
+                reply = client.chat.completions.create(
+                    model=api["model"],
+                    messages=api_messages,
+                    tools=api_tools,
+                )
+                spinner.stop()
+            except Exception as e:
+                spinner.stop() 
+                print(f"[API 错误] {e}")
+                api_error_occurred = True
+                break  # 跳出内层循环
 
-        raw_content = reply.choices[0].message.content
-        content = storage.extract_and_save_memory(raw_content)
+            message = reply.choices[0].message
+            
+            if message.tool_calls:
+                messages.append({
+                    "role": "assistant",
+                    "content": message.content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        } for tc in message.tool_calls
+                    ]
+                })
+                
+                # 执行所有工具
+                for tool_call in message.tool_calls:
+                    function_name = tool_call.function.name
+                    try:
+                        arguments = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+                        
+                    print(f" \033[35m[Agent 正在调用工具: {function_name}]\033[0m")
+                    
+                    result = "错误：未找到此工具"
+                    for tool in AVAILABLE_TOOLS:
+                        if tool.name == function_name:
+                            try:
+                                if function_name == "write_file":
+                                    content_to_write = arguments.get("content", "")
+                                    path_str = arguments.get("path", "")
+                                    preview = "\n".join(content_to_write.splitlines()[:5])
+                                    print(f"\n--- Agent 请求写入文件: {path_str} ---")
+                                    print(f"{preview}\n...")
+                                    
+                                    ans = session.prompt("是否允许写入？[y/N] ").strip().lower()
+                                    if ans != 'y':
+                                        result = "写入失败：用户拒绝了写入操作。"
+                                    else:
+                                        result = tool.run(arguments)
+                                else:
+                                    result = tool.run(arguments)
+                                    
+                            except OutOfSandboxError as e:
+                                target_path = arguments.get("path", "")
+                                if target_path in authorized_paths:
+                                    result = tool.run(arguments, force=True)
+                                else:
+                                    print(f"\n[安全警告] 尝试访问沙箱外部的文件：\n{e}")
+                                    ans = session.prompt("是否允许本次读取/写入？[y/N] ").strip().lower()
+                                    if ans == 'y':
+                                        authorized_paths.add(target_path)
+                                        result = tool.run(arguments, force=True) 
+                                    else:
+                                        result = "读取/写入被用户拒绝。"
+                            except PermissionError as e:
+                                result = f"安全拦截：权限不足 {e}"
+                            except Exception as e:
+                                result = f"执行错误：{e}"
+                            break
+                    
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": str(result)
+                    })
+                
+                continue 
+            else:
+                raw_content = message.content
+                content = storage.extract_and_save_memory(raw_content)
+                print(f"\n\033[34mOmyDs > {content}\033[0m")
+                messages.append({"role": "assistant", "content": content})
+                break
 
-        print(f"\n\033[34mOmyDs > {content}\033[0m")
-        messages.append({"role": "assistant", "content": content})
+        # 如果因为 API 报错（如上下文脏了导致 400），需要回滚，否则这轮记录会一直卡死
+        if api_error_occurred:
+            # 把这次对话（包括用户的输入和可能半截的工具结果）全部截断掉
+            messages = messages[:msg_len_before_input]
+            print(" \033[31m[系统：检测到 API 错误，已清理当前轮次损坏的上下文。请重试。]\033[0m")
 
-    # === 4. 退出时的保存逻辑 ===
+    # === 退出时的保存逻辑 ===
     print("\n[退出]")
     
     if len(messages) <= 1:
