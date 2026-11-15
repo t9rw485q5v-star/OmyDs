@@ -21,11 +21,15 @@ def load_session(name: str) -> list:
         return json.load(f)
 
 def save_session(name: str, messages: list):
-    """保存消息列表到文件"""
+    """保存消息列表到文件（只保存纯对话，过滤掉系统提示词以实现热更新）"""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     file_path = SESSIONS_DIR / f"{name}.json"
+    
+    # === 核心改动：过滤掉 system 角色 (v0.1.7) ===
+    clean_messages = [m for m in messages if m.get("role") != "system"]
+    
     with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(messages, f, ensure_ascii=False, indent=2)
+        json.dump(clean_messages, f, ensure_ascii=False, indent=2)
 
 # 长期记忆(v0.1.3)
 def extract_and_save_memory(text: str) -> str:

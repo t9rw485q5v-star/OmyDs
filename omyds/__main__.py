@@ -8,11 +8,12 @@ from openai import OpenAI
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from pathlib import Path
-from .config import load_config, get_system_prompt
+from .config import load_config, get_system_prompt, get_greeting
 from . import storage
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
 from .security import OutOfSandboxError
 from omyds.tools import AVAILABLE_TOOLS
+from .logo import LOGO
 
 class Spinner:
     def __init__(self, message="思考中 "):
@@ -68,6 +69,11 @@ def main():
                 system_prompt += f"\n\n【用户长期记忆档案】\n{memory_content}"
 
     client = OpenAI(api_key=api["key"], base_url=api["base_url"])
+    # === banner ===
+    print(LOGO)
+    remind_msg = get_greeting()
+    if remind_msg:
+        print(remind_msg)
 
     sessions = storage.list_sessions()
     print("--- OmyDs v0.1.6 ---")
@@ -88,6 +94,9 @@ def main():
             if 1 <= idx <= len(sessions):
                 session_name = sessions[idx - 1]
                 messages = storage.load_session(session_name)
+                # 清洗掉可能残留的旧 system，并注入最新的 system_prompt
+                messages = [m for m in messages if m.get("role") != "system"]
+                messages.insert(0, {"role": "system", "content": system_prompt})
                 print(f"已加载会话：{session_name}")
             else:
                 is_new_session = True
@@ -101,6 +110,7 @@ def main():
         session_name = None
         messages = [{"role": "system", "content": system_prompt}]
             
+    # 获取并打印 greeting
     print(f"\n\033[36m=== 欢迎来到 OmyDs~ ===\033[0m\n已进入对话。输入 exit 或 quit 退出。(使用 /help 指令寻求帮助)")
 
     history_file = Path.home() / ".omyds_history"
@@ -210,7 +220,9 @@ def main():
 
             message = reply.choices[0].message
             
+            # === 核心修复：处理工具调用 ===
             if message.tool_calls:
+                # 1. 将模型请求存入历史
                 messages.append({
                     "role": "assistant",
                     "content": message.content,
@@ -226,7 +238,7 @@ def main():
                     ]
                 })
                 
-                # 执行所有工具
+                # 2. 遍历并执行所有工具
                 for tool_call in message.tool_calls:
                     function_name = tool_call.function.name
                     try:
@@ -271,25 +283,28 @@ def main():
                                 result = f"安全拦截：权限不足 {e}"
                             except Exception as e:
                                 result = f"执行错误：{e}"
-                            break
+                            break  # 跳出内层 for tool in AVAILABLE_TOOLS
                     
+                    # === 必须在这里，对每一个 tool_call 追加结果 ===
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": str(result)
                     })
                 
-                continue 
+                # 所有工具执行完毕后，继续内层 while 循环，重新请求 API
+                continue
+            
             else:
+                # 普通回复，打印，退出内层循环
                 raw_content = message.content
                 content = storage.extract_and_save_memory(raw_content)
                 print(f"\n\033[34mOmyDs > {content}\033[0m")
                 messages.append({"role": "assistant", "content": content})
                 break
 
-        # 如果因为 API 报错（如上下文脏了导致 400），需要回滚，否则这轮记录会一直卡死
+        # 如果因为 API 报错（如上下文脏了导致 400），需要回滚
         if api_error_occurred:
-            # 把这次对话（包括用户的输入和可能半截的工具结果）全部截断掉
             messages = messages[:msg_len_before_input]
             print(" \033[31m[系统：检测到 API 错误，已清理当前轮次损坏的上下文。请重试。]\033[0m")
 

@@ -5,6 +5,7 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.toml"
 CONFIG_EXAMPLE_PATH = Path(__file__).parent.parent /"config.example.toml"
 AGENT_PATH = Path(__file__).parent.parent /"agent.md"
 AGENT_EXAMPLE_PATH = Path(__file__).parent.parent /"agent.example.md"
+GREET_PATH = Path(__file__).parent.parent / "greet.toml"
 
 def load_config():
     # 1. 读 config.toml，如果不存在则读 example
@@ -38,3 +39,22 @@ def get_system_prompt(cfg):
     else:
         # 如果 example 不存在，回退到 config.toml
         return cfg.get("chat", {}).get("system_prompt", "你是 OmyDs，一个简洁的终端助手。")
+
+    GREET_PATH = Path(__file__).parent.parent / "greet.toml"
+
+def get_greeting() -> str:
+    """读取并组装启动时的训诫（如果没有开启则返回空字符串）"""
+    remind_text = ""
+
+    if GREET_PATH.exists():
+        with open(GREET_PATH, "rb") as f:
+            cfg = tomllib.load(f)
+            greet = cfg.get("greeting", {})
+            
+            if greet.get("remind", True):
+                # 如果 remind 是 true，返回自定义的训诫内容
+                msg = greet.get("message", "").strip()
+                if msg:
+                    remind_text = f"\n{msg}\n"
+
+    return remind_text
