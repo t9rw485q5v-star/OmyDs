@@ -9,3 +9,6 @@ hello.py
 *.json
 .omyds_history
 agent.md
+# AI 沙箱测试产物
+sandbox/*
+!sandbox/.gitkeep

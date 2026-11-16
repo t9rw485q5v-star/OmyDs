@@ -1,8 +1,9 @@
 from .read_file import ReadFileTool
 from .write_file import WriteFileTool
+from .run_command import RunCommandTool
 
-# 注册工具
 AVAILABLE_TOOLS = [
     ReadFileTool(),
-    WriteFileTool()
+    WriteFileTool(),
+    RunCommandTool()
 ]
