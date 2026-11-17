@@ -1,4 +1,5 @@
-from pathlib import Path
+import os
+import tempfile
 from ..security import validate_path, OutOfSandboxError
 
 class WriteFileTool:
@@ -25,25 +26,33 @@ class WriteFileTool:
             content = arguments.get("content")
             mode = arguments.get("mode", "overwrite")
             
-            # 路径校验
-            if force:
-                safe_path = Path(path_str).expanduser().resolve()
-            else:
-                safe_path = validate_path(path_str)
-
-            # 执行写入
+            safe_path = validate_path(path_str, allow_outside=force)
+            if mode not in {"append", "overwrite"}:
+                raise ValueError("mode 必须是 append 或 overwrite")
+            if not isinstance(content, str):
+                raise ValueError("content 必须是字符串")
             if mode == "append":
                 with open(safe_path, "a", encoding="utf-8") as f:
                     f.write(content)
                 return "追加写入成功。"
-            else:
-                # 覆盖写入：使用临时文件 + 原子替换，防止写一半断电导致文件损坏
-                tmp_path = safe_path.with_suffix(".tmp")
-                with open(tmp_path, "w", encoding="utf-8") as f:
+            temp_name = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=safe_path.parent,
+                    prefix=".omyds-write-", delete=False
+                ) as f:
+                    temp_name = f.name
                     f.write(content)
-                tmp_path.replace(safe_path)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if safe_path.exists():
+                    os.chmod(temp_name, safe_path.stat().st_mode & 0o777)
+                os.replace(temp_name, safe_path)
                 return "覆盖写入成功。"
-                
+            finally:
+                if temp_name and os.path.exists(temp_name):
+                    os.unlink(temp_name)
+
         except OutOfSandboxError:
             # 抛出这个异常，让主程序弹窗询问用户
             raise

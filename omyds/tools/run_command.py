@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from pathlib import Path
 from .. import security
 
 class RunCommandTool:
@@ -29,21 +30,29 @@ class RunCommandTool:
 
         # 实时获取当前挂载的目录
         current_root = security.ALLOWED_ROOT
-        current_root.mkdir(parents=True, exist_ok=True)
+        security.check_policy(current_root)
+        if not current_root.is_dir():
+            return "错误：工作区不存在。"
+
         
         bwrap_cmd = [
             "bwrap",
             "--ro-bind", "/usr", "/usr",
             "--ro-bind", "/bin", "/bin",
             "--ro-bind", "/lib", "/lib",
-            "--ro-bind", "/lib64", "/lib64",
-            "--ro-bind", "/etc/alternatives", "/etc/alternatives",
+            *sum((["--ro-bind", path, path] for path in
+                   ("/lib64", "/etc/alternatives") if Path(path).exists()), []),
             "--dev", "/dev",
             "--proc", "/proc",
             "--tmpfs", "/tmp",
             "--bind", str(current_root), str(current_root),
             "--chdir", str(current_root),
             "--unshare-all",
+            "--new-session",
+            "--clearenv",
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "HOME", "/tmp",
+            "--setenv", "LANG", "C.UTF-8",
             "--die-with-parent",
             "sh", "-c", cmd
         ]
@@ -56,9 +65,7 @@ class RunCommandTool:
                 timeout=10
             )
             output = result.stdout + result.stderr
-            if not output.strip():
-                return "命令执行成功，无输出。"
-            return output[:2000]
+            return f"退出码: {result.returncode}\n{output[:2000] or '（无输出）'}"
         except FileNotFoundError:
             return "错误：未找到 bwrap。"
         except subprocess.TimeoutExpired:

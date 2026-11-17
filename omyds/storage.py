@@ -1,35 +1,61 @@
 import json
 import re
+import os
+import tempfile
 from pathlib import Path
 
 # 规定存在用户主目录下的 .omyds/sessions 里
 SESSIONS_DIR = Path.home() / ".omyds" / "sessions"
 MEMORY_FILE = Path.home() / ".omyds" / "memory.md"
 
+def session_path(name):
+    if not isinstance(name, str) or not name.strip() or name in {".", ".."} or any(
+        c in name for c in ("/", "\\", "\0")
+    ):
+        raise ValueError("会话名称必须是普通文件名，不能包含路径分隔符")
+    path = SESSIONS_DIR / f"{name}.json"
+    if path.is_symlink():
+        raise ValueError("会话文件不能是符号链接")
+    return path
+
+
 def list_sessions() -> list[str]:
     """列出所有已保存的对话"""
     if not SESSIONS_DIR.exists():
         return []
-    return [p.stem for p in SESSIONS_DIR.glob("*.json")]
+    return sorted(p.stem for p in SESSIONS_DIR.glob("*.json") if not p.is_symlink())
 
 def load_session(name: str) -> list:
     """读取特定会话的消息列表"""
-    file_path = SESSIONS_DIR / f"{name}.json"
+    file_path = session_path(name)
     if not file_path.exists():
         return []
     with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        messages = json.load(f)
+    if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
+        raise ValueError("会话文件必须包含消息字典列表")
+    return messages
 
 def save_session(name: str, messages: list):
     """保存消息列表到文件（只保存纯对话，过滤掉系统提示词以实现热更新）"""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = SESSIONS_DIR / f"{name}.json"
+    file_path = session_path(name)
     
     # === 核心改动：过滤掉 system 角色 (v0.1.7) ===
     clean_messages = [m for m in messages if m.get("role") != "system"]
     
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(clean_messages, f, ensure_ascii=False, indent=2)
+    temp_name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                         dir=SESSIONS_DIR, delete=False) as f:
+            temp_name = f.name
+            json.dump(clean_messages, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_name, file_path)
+    finally:
+        if temp_name and os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 # 长期记忆(v0.1.3)
 def extract_and_save_memory(text: str) -> str:

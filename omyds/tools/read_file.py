@@ -16,10 +16,7 @@ class ReadFileTool:
     def run(self, arguments: dict, force: bool = False) -> str:
         try:
             path_str = arguments.get("path")
-            if force:
-                safe_path = Path(path_str).expanduser().resolve()
-            else:
-                safe_path = validate_path(path_str)
+            safe_path = validate_path(path_str, allow_outside=force)
                 
             if not safe_path.is_file():
                 return f"错误：{path_str} 不存在或不是一个文件。"

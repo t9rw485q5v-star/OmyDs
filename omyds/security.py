@@ -1,47 +1,63 @@
 from pathlib import Path
-import sys
 
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 SANDBOX_ROOT = BASE_DIR / "sandbox"
 SANDBOX_ROOT.mkdir(parents=True, exist_ok=True)
-
 ALLOWED_ROOT = SANDBOX_ROOT
 
-FORBIDDEN_NAMES = {"config.toml", ".env", "id_rsa", "id_ed25519", ".git", ".venv", "agent.md", "__pycache__"}
+FORBIDDEN_NAMES = {"config.toml", ".env", "id_rsa", "id_ed25519", ".git",
+                   ".venv", "agent.md", "__pycache__"}
+SYSTEM_ROOTS = tuple(Path(p) for p in
+                     ("/etc", "/proc", "/sys", "/dev", "/boot", "/usr", "/bin",
+                      "/sbin", "/lib", "/lib64", "/root"))
+
 
 class OutOfSandboxError(PermissionError):
     pass
 
-def validate_path(user_path: str) -> Path:
-    # ... (保持你之前的逻辑不变) ...
-    path_obj = Path(user_path).expanduser()
-    if not path_obj.is_absolute():
-        resolved = (ALLOWED_ROOT / path_obj).resolve()
-    else:
-        resolved = path_obj.resolve()
 
-    for part in resolved.parts:
+def resolve_path(user_path):
+    if not isinstance(user_path, str) or not user_path.strip():
+        raise ValueError("路径不能为空")
+    path = Path(user_path).expanduser()
+    return (path if path.is_absolute() else ALLOWED_ROOT / path).resolve()
+
+
+def check_policy(path):
+    for part in path.parts:
         if part in FORBIDDEN_NAMES:
-            raise PermissionError(f"安全拦截：禁止访问敏感文件 '{part}'")
-    if resolved.suffix in [".key", ".pem"]:
-        raise PermissionError(f"安全拦截：禁止读取密钥文件")
+            raise PermissionError(f"禁止访问敏感文件或目录：{part}")
+    if path.suffix in {".key", ".pem"}:
+        raise PermissionError("禁止访问密钥文件")
+    if path == Path("/") or any(path.is_relative_to(p.resolve()) for p in SYSTEM_ROOTS):
+        raise PermissionError("禁止访问系统目录")
+    if path.is_relative_to(BASE_DIR) and not path.is_relative_to(SANDBOX_ROOT):
+        raise PermissionError("禁止通过工具访问正在运行的 OmyDs 项目；请使用独立工作副本")
 
-    try:
-        resolved.relative_to(ALLOWED_ROOT)
-    except ValueError:
-        raise OutOfSandboxError(f"越界拦截：AI 被锁定在 {ALLOWED_ROOT.name} 目录内，无法访问外部文件。")
 
-    return resolved
+def validate_path(user_path, allow_outside=False):
+    path = resolve_path(user_path)
+    check_policy(path)
+    if not allow_outside and not path.is_relative_to(ALLOWED_ROOT):
+        raise OutOfSandboxError(f"目标 {path} 位于工作区 {ALLOWED_ROOT} 之外")
+    return path
 
-def set_workdir(new_dir: str):
+
+def set_workdir(new_dir):
     global ALLOWED_ROOT
-    target = (BASE_DIR / new_dir).resolve() if not Path(new_dir).is_absolute() else Path(new_dir).resolve()
-    if target == Path("/") or str(target).startswith("/etc"):
-        raise PermissionError("拒绝挂载系统根目录或敏感目录！")
+    if not isinstance(new_dir, str) or not new_dir.strip():
+        raise ValueError("请提供工作区路径")
+    raw = Path(new_dir).expanduser()
+    target = (raw if raw.is_absolute() else BASE_DIR / raw).resolve()
+    check_policy(target)
+    if BASE_DIR.is_relative_to(target):
+        raise PermissionError("工作区不能包含正在运行的 OmyDs 项目")
+    if not target.is_dir():
+        raise ValueError("工作区必须是已存在的目录")
     ALLOWED_ROOT = target
     return str(target)
 
-# 新增：恢复默认
+
 def reset_workdir():
     global ALLOWED_ROOT
     ALLOWED_ROOT = SANDBOX_ROOT
