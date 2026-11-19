@@ -20,13 +20,13 @@ class WriteFileTool:
             "required": ["path", "content"]
         }
 
-    def run(self, arguments: dict, force: bool = False) -> str:
+    def run(self, arguments: dict, force: bool = False, *, host: bool = False) -> str:
         try:
             path_str = arguments.get("path")
             content = arguments.get("content")
             mode = arguments.get("mode", "overwrite")
             
-            safe_path = validate_path(path_str, allow_outside=force)
+            safe_path = validate_path(path_str, allow_outside=force, host=host)
             if mode not in {"append", "overwrite"}:
                 raise ValueError("mode 必须是 append 或 overwrite")
             if not isinstance(content, str):

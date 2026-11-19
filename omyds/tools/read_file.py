@@ -13,10 +13,10 @@ class ReadFileTool:
             "required": ["path"]
         }
 
-    def run(self, arguments: dict, force: bool = False) -> str:
+    def run(self, arguments: dict, force: bool = False, *, host: bool = False) -> str:
         try:
             path_str = arguments.get("path")
-            safe_path = validate_path(path_str, allow_outside=force)
+            safe_path = validate_path(path_str, allow_outside=force, host=host)
                 
             if not safe_path.is_file():
                 return f"错误：{path_str} 不存在或不是一个文件。"

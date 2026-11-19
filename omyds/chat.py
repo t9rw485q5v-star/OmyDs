@@ -1,6 +1,7 @@
 """Agent loop independent of terminal UI and session selection."""
 from .context import assistant_message, build_context, ContextError
-from . import storage
+from . import storage, security
+from .permissions import runtime_context
 
 
 def run_turn(client, api, messages, executor, ui, user_input=None,
@@ -11,6 +12,11 @@ def run_turn(client, api, messages, executor, ui, user_input=None,
     for _ in range(max_steps):
         try:
             request_messages = build_context(messages, max_chars)
+            state = runtime_context(executor.mode, security.ALLOWED_ROOT)
+            if request_messages and request_messages[0].get("role") == "system":
+                request_messages[0]["content"] = (request_messages[0].get("content") or "") + state
+            else:
+                request_messages.insert(0, {"role": "system", "content": state})
             kwargs = {}
             if api.get("thinking") in ("enabled", "disabled"):
                 kwargs["extra_body"] = {"thinking": {"type": api["thinking"]}}

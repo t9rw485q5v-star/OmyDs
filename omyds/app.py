@@ -2,16 +2,17 @@
 from . import storage, security
 from .chat import run_turn
 from .config import load_config, get_system_prompt, get_greeting
-from .logo import LOGO
 from .tool_executor import ToolExecutor
 from .tools import AVAILABLE_TOOLS
 from .ui import TerminalUI
+from .permissions import Mode, MODE_LABELS
+from .tools.run_command import host_execution_error
 
 
 def select_session(ui):
     while True:
         sessions = storage.list_sessions()
-        ui.say("\n--- OmyDs v0.1.9.11 ---")
+        ui.say("\n--- OmyDs v0.1.9.12 ---")
         for index, name in enumerate(sessions, 1):
             ui.say(f"  {index}. {name}")
         ui.say("  0. 新建对话\n  q. 退出")
@@ -56,9 +57,10 @@ def conversation(ui, client, api, messages, name):
     executor = ToolExecutor(AVAILABLE_TOOLS, ui)
     dirty = False
     pending = False
+    ui.set_mode(executor.mode)
     ui.say("\n=== 欢迎来到 OmyDs~ ===", style="blue")
     ui.say("已进入对话。/help 查看帮助，/return 返回菜单，exit 退出。")
-    ui.say(f"当前工作区: {security.ALLOWED_ROOT}", style="green")
+    ui.show_permissions(executor.mode, security.ALLOWED_ROOT)
     while True:
         try:
             text = ui.prompt("\n >> ")
@@ -76,11 +78,40 @@ def conversation(ui, client, api, messages, name):
             ui.help()
         elif command == "/history":
             ui.history(messages)
+        elif command in {"/permissions", "/safe", "/danger-full"}:
+            requested = ("workspace" if command == "/safe" else
+                         "danger-full" if command == "/danger-full" else argument.strip())
+            if not requested:
+                ui.show_permissions(executor.mode, security.ALLOWED_ROOT, detailed=True)
+                continue
+            try:
+                new_mode = Mode(requested)
+            except ValueError:
+                ui.say("用法：/permissions ask|workspace|danger-full")
+                continue
+            if new_mode == executor.mode:
+                ui.show_permissions(executor.mode, security.ALLOWED_ROOT, detailed=True)
+                continue
+            if new_mode == Mode.DANGER_FULL:
+                error = host_execution_error()
+                if error:
+                    ui.say(error, style="red")
+                    continue
+                try:
+                    if not ui.confirm_danger(security.ALLOWED_ROOT):
+                        ui.say("未切换权限模式。")
+                        continue
+                except (KeyboardInterrupt, EOFError):
+                    ui.say("已取消切换。")
+                    continue
+            executor.mode = new_mode
+            ui.set_mode(new_mode)
+            ui.show_permissions(new_mode, security.ALLOWED_ROOT)
         elif command in {"/set-project-root-in", "/reset-project-root"}:
             try:
                 root = (security.reset_workdir() if command == "/reset-project-root"
                         else security.set_workdir(argument.strip()))
-                ui.say(f"工作区: {root}", style="green")
+                ui.show_permissions(executor.mode, security.ALLOWED_ROOT)
             except (OSError, ValueError) as exc:
                 ui.say(f"切换失败：{exc}")
         elif command == "/retry":
@@ -97,7 +128,7 @@ def conversation(ui, client, api, messages, name):
 
 
 def run_app(cfg, client, ui):
-    ui.say(LOGO)
+    ui.show_logo()
     greeting = get_greeting()
     if greeting:
         ui.say(greeting)

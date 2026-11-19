@@ -1,19 +1,32 @@
-"""One result per call, including denial and failures during an approved retry."""
+"""One result per call; permissions come only from the local conversation."""
+import copy
 import json
 from . import security
+from .permissions import Mode
 
 
 class ToolExecutor:
-    def __init__(self, tools, ui):
+    def __init__(self, tools, ui, mode=Mode.WORKSPACE):
         self.tools = {tool.name: tool for tool in tools}
         self.ui = ui
+        self.mode = mode
         self.cancelled = False
 
     @property
     def schemas(self):
-        return [{"type": "function", "function": {
-            "name": t.name, "description": t.description, "parameters": t.parameters
-        }} for t in self.tools.values()]
+        result = []
+        for tool in self.tools.values():
+            parameters = copy.deepcopy(tool.parameters)
+            parameters.setdefault("properties", {}).update({
+                "purpose": {"type": "string", "description": "用简明中文说明本步骤具体要完成什么目标"},
+                "impact": {"type": "string", "description": "说明将读取/创建/覆盖/删除哪些内容，是否联网；不确定时明确说不确定"},
+            })
+            parameters["required"] = list(dict.fromkeys(parameters.get("required", []) + ["purpose", "impact"]))
+            parameters["additionalProperties"] = False
+            result.append({"type": "function", "function": {
+                "name": tool.name, "description": tool.description, "parameters": parameters,
+            }})
+        return result
 
     def execute(self, call):
         try:
@@ -24,30 +37,47 @@ class ToolExecutor:
             tool = self.tools.get(name)
             if tool is None:
                 return f"客户端错误：未知工具 {name}"
-            for key in tool.parameters.get("required", []):
+            spec = next(s["function"]["parameters"] for s in self.schemas
+                        if s["function"]["name"] == name)
+            for key in spec["required"]:
                 if key not in arguments:
-                    raise ValueError(f"缺少参数 {key}")
+                    raise ValueError(f"缺少参数 {key}；请先说明目的和影响，尚未执行")
             for key, value in arguments.items():
-                spec = tool.parameters.get("properties", {}).get(key, {})
-                if spec.get("type") == "string" and not isinstance(value, str):
+                if key not in spec["properties"]:
+                    raise ValueError(f"不支持参数 {key}；权限只能由用户通过客户端指令切换")
+                field = spec["properties"][key]
+                if field.get("type") == "string" and not isinstance(value, str):
                     raise ValueError(f"{key} 必须是字符串")
-                if "enum" in spec and value not in spec["enum"]:
+                if "enum" in field and value not in field["enum"]:
                     raise ValueError(f"{key} 不在允许值中")
-            self.ui.say(f"[工具] {name}")
-            if name == "run_command":
-                if not self.ui.confirm_tool(name, arguments, security.ALLOWED_ROOT):
-                    return self.denied()
-                return str(tool.run(arguments))
+            for key in ("purpose", "impact"):
+                if not arguments[key].strip():
+                    raise ValueError(f"{key} 不能为空，尚未执行")
+
+            host = self.mode == Mode.DANGER_FULL
+            outside = False
             if name in {"read_file", "write_file"}:
-                # Canonicalize once before displaying/authorizing; retries use the same path.
                 arguments["path"] = str(security.resolve_path(arguments["path"]))
+                outside = not security.resolve_path(arguments["path"]).is_relative_to(security.ALLOWED_ROOT)
                 try:
-                    security.validate_path(arguments["path"])
+                    security.validate_path(arguments["path"], host=host)
                 except security.OutOfSandboxError:
-                    if not self.ui.confirm_tool(name, arguments, security.ALLOWED_ROOT, outside=True):
-                        return self.denied()
-                    return str(tool.run(arguments, force=True))
-            return str(tool.run(arguments))
+                    pass  # Only this boundary is overridable by a single-file confirmation.
+            needs_confirmation = not host and (
+                outside or (self.mode == Mode.ASK and name in {"run_command", "write_file"})
+            )
+            # Display declared intent separately from facts determined by this client.
+            self.ui.describe_tool(name, arguments, security.ALLOWED_ROOT, self.mode, outside)
+            if needs_confirmation and not self.ui.confirm_tool(
+                name, arguments, security.ALLOWED_ROOT, outside=outside
+            ):
+                return self.denied()
+            tool_args = {k: v for k, v in arguments.items() if k not in {"purpose", "impact"}}
+            if host:
+                return str(tool.run(tool_args, host=True))
+            if outside:
+                return str(tool.run(tool_args, force=True))
+            return str(tool.run(tool_args))
         except (KeyboardInterrupt, EOFError):
             self.cancelled = True
             return "用户中断了授权或工具执行；执行状态可能不确定，请先检查，不要直接重做。"
