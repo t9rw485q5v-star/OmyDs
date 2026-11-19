@@ -141,4 +141,4 @@ The README describes the project, installation, and stable usage. Version-specif
 
 [MIT](LICENSE)
 
-*O my DeepSeek. Starting in the terminal, remembering what matters.*
+*O my Ds. Starting in the terminal, remembering what matters.*

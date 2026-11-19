@@ -141,4 +141,4 @@ README 介绍项目定位、安装和稳定用法；版本变化见 [CHANGELOG](
 
 [MIT](LICENSE)
 
-*O my DeepSeek. 从终端开始，记得重要的事。*
+*O my Ds. 从终端开始，记得重要的事。*
