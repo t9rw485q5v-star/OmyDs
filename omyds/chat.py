@@ -1,22 +1,28 @@
 """Agent loop independent of terminal UI and session selection."""
-from .context import assistant_message, build_context, ContextError
+from .context import assistant_message, prepare_context, ContextError
 from . import storage, security
 from .permissions import runtime_context
 
 
+def request_context(messages, executor, max_chars=None):
+    return prepare_context(
+        messages, executor.max_context_chars if max_chars is None else max_chars,
+        executor.history_tool_chars,
+        runtime_context(executor.mode, security.ALLOWED_ROOT, executor.web_enabled),
+    )
+
+
 def run_turn(client, api, messages, executor, ui, user_input=None,
-             max_steps=16, max_chars=32000):
+             max_steps=16, max_chars=None):
     if user_input is not None:
         messages.append({"role": "user", "content": user_input})
     executor.cancelled = False
     for _ in range(max_steps):
         try:
-            request_messages = build_context(messages, max_chars)
-            state = runtime_context(executor.mode, security.ALLOWED_ROOT)
-            if request_messages and request_messages[0].get("role") == "system":
-                request_messages[0]["content"] = (request_messages[0].get("content") or "") + state
-            else:
-                request_messages.insert(0, {"role": "system", "content": state})
+            request_messages, info = request_context(messages, executor, max_chars)
+            if any(info.notice_key) and info.notice_key != executor.context_notice:
+                ui.say("[上下文] " + info.description() + " 原始记录未删除；/context 查看。", style="yellow")
+            executor.context_notice = info.notice_key
             kwargs = {}
             if api.get("thinking") in ("enabled", "disabled"):
                 kwargs["extra_body"] = {"thinking": {"type": api["thinking"]}}

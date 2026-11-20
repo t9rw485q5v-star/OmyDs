@@ -4,5 +4,14 @@ key = "sk-你的key"
 base_url = "https://api.deepseek.com"
 model = "deepseek-flash"
 
+# 可选：明确控制 DeepSeek 思考模式；省略时遵循服务端默认设置。
+# thinking = "enabled"
+# 旧会话已丢失 reasoning_content 时，可新建会话验证，
+# 或设置 thinking = "disabled"；缺失的历史思考内容无法恢复。
+
 [chat]
+## 请求消息的软字符预算（不是模型 token 上限）；当前轮次超出时仍完整保留并提示。
+max_context_chars = 64000
+## 预算不足时，旧轮次的长工具输出保留首尾；0 表示不缩短。原始记录不变。
+history_tool_chars = 4000
 system_prompt = "你是 OmyDs，一个简洁、直接的终端聊天助手。"

@@ -1,5 +1,6 @@
 import tomllib
 from pathlib import Path
+from .context import context_settings
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.toml"
 CONFIG_EXAMPLE_PATH = Path(__file__).parent.parent /"config.example.toml"
@@ -22,6 +23,7 @@ def load_config():
         cfg = tomllib.load(f)
 
     api = cfg["api"]
+    context_settings(cfg.get("chat", {}))
     # key 不能是示例占位符
     if api.get("key", "").startswith("sk-") and "keykeykey" in api["key"]:
         raise RuntimeError("检测到示例 key，请填入真实 DeepSeek API key")

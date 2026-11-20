@@ -8,6 +8,20 @@ import tempfile
 from .. import security
 
 
+SYSTEM_CA_BUNDLES = (
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/ssl/cert.pem",
+)
+SANDBOX_CA_FILE = "/run/omyds/ca-bundle.pem"
+
+
+def system_ca_bundle():
+    # Only public system bundles; never inherit an arbitrary SSL_CERT_FILE path.
+    return next((Path(p).resolve() for p in SYSTEM_CA_BUNDLES if Path(p).is_file()), None)
+
+
 def host_execution_error():
     if sys.platform != "linux":
         return "本版 danger-full 仅支持 Linux。"
@@ -18,7 +32,7 @@ def host_execution_error():
     return None
 
 
-def command_argv(command, root, host=False):
+def command_argv(command, root, host=False, *, network=False):
     if host:
         error = host_execution_error()
         if error:
@@ -39,14 +53,34 @@ def command_argv(command, root, host=False):
     for path in ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives"):
         if Path(path).exists():
             argv.extend(["--ro-bind", path, path])
+    ca_bundle = system_ca_bundle() if network else None
+    if network:
+        # Public resolver configuration and CA certificates only, never /etc as a whole.
+        # Resolve source symlinks: resolv.conf often points into /run on the host.
+        for name in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf",
+                     "/etc/ssl/certs", "/etc/ssl/cert.pem", "/etc/pki/ca-trust/extracted",
+                     "/etc/pki/tls/certs", "/etc/pki/tls/cert.pem"):
+            path = Path(name)
+            if path.exists():
+                argv.extend(["--ro-bind", str(path.resolve()), name])
+        if ca_bundle:
+            argv.extend(["--ro-bind", str(ca_bundle), SANDBOX_CA_FILE])
     argv.extend([
         "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
         "--bind", str(root), str(root), "--chdir", str(root),
-        "--unshare-all", "--new-session", "--clearenv",
+        "--unshare-all",
+    ])
+    if network:
+        argv.append("--share-net")
+    argv.extend([
+        "--new-session", "--clearenv",
         "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "HOME", "/tmp",
         "--setenv", "LANG", "C.UTF-8", "--die-with-parent",
-        "/bin/sh", "-c", command,
     ])
+    if ca_bundle:
+        argv.extend(["--setenv", "SSL_CERT_FILE", SANDBOX_CA_FILE,
+                     "--setenv", "CURL_CA_BUNDLE", SANDBOX_CA_FILE])
+    argv.extend(["/bin/sh", "-c", command])
     return argv
 
 
@@ -92,7 +126,7 @@ class RunCommandTool:
             "required": ["command"],
         }
 
-    def run(self, arguments, *, host=False):
+    def run(self, arguments, *, host=False, network=False):
         command = arguments.get("command")
         if not isinstance(command, str) or not command.strip():
             return "错误：命令不能为空。"
@@ -100,7 +134,7 @@ class RunCommandTool:
         if not root.is_dir():
             return "错误：工作区不存在。"
         try:
-            return run_process(command_argv(command, root, host), root, host)
+            return run_process(command_argv(command, root, host, network=network), root, host)
         except (KeyboardInterrupt, EOFError):
             raise
         except Exception as exc:

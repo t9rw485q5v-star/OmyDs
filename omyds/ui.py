@@ -6,10 +6,11 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.styles import Style
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
-from .permissions import Mode, MODE_LABELS
+from .permissions import Mode, MODE_LABELS, network_label
 
 COMMANDS = ["/help", "/history", "/return", "/retry", "/permissions ",
-            "/safe", "/danger-full", "/set-project-root-in ", "/reset-project-root"]
+            "/safe", "/danger-full", "/web on", "/web off", "/web status", "/context ",
+            "/set-project-root-in ", "/reset-project-root"]
 
 
 class CommandAutoSuggest(AutoSuggest):
@@ -45,6 +46,7 @@ class TerminalUI:
         from rich.console import Console
         self.console = Console()
         self.mode = Mode.WORKSPACE
+        self.web_enabled = False
         self.session = PromptSession(
             history=CommandOnlyHistory(str(Path.home() / ".omyds_history")),
             auto_suggest=CommandAutoSuggest(), lexer=CommandLexer(),
@@ -57,13 +59,16 @@ class TerminalUI:
         # Only the built-in artwork is allowed to supply ANSI color styling.
         self.console.print(Text.from_ansi(LOGO))
 
-    def set_mode(self, mode):
+    def set_mode(self, mode, web_enabled=False):
         self.mode = mode
+        self.web_enabled = web_enabled
 
     def prompt(self, text):
         if text == "\n >> ":
             style = "danger" if self.mode == Mode.DANGER_FULL else self.mode.value
-            text = FormattedText([("", "\n"), (f"class:{style}", f"[{self.mode.value}]"), ("", " >> ")])
+            label = "safe" if self.mode == Mode.WORKSPACE else self.mode.value
+            network = "web" if self.mode == Mode.DANGER_FULL or self.web_enabled else "offline"
+            text = FormattedText([("", "\n"), (f"class:{style}", f"[{label} · {network}]"), ("", " >> ")])
         return self.session.prompt(text).strip()
 
     def say(self, text, style=None):
@@ -84,6 +89,8 @@ class TerminalUI:
             ("/permissions", "查看权限与工作区"),
             ("/permissions ask", "写入、命令逐次确认"),
             ("/safe", "工作区自动模式"),
+            ("/web on|off|status", "沙箱联网开关 / 查看状态"),
+            ("/context [字符数]", "查看上下文 / 调整本会话预算"),
             ("/danger-full", "宿主机模式（需确认）"),
             ("/set-project-root-in <路径>", "切换工作区"),
             ("/reset-project-root", "恢复默认工作区"),
@@ -92,7 +99,7 @@ class TerminalUI:
             table.add_row(command, description)
         self.console.print()
         self.console.print(table)
-        self.say("\n提示：切换目录不是切换权限。/safe 可随时恢复工作区模式。", style="dim")
+        self.say("\n切换权限、网络和目录均保留会话；/safe 保留沙箱联网设置。", style="dim")
 
     def answer(self, content):
         from rich.markdown import Markdown
@@ -104,8 +111,9 @@ class TerminalUI:
         with self.console.status("思考中…"):
             yield
 
-    def show_permissions(self, mode, root, detailed=False):
-        self.say(f"模式: {MODE_LABELS[mode]}", style="bold red" if mode == Mode.DANGER_FULL else "green")
+    def show_permissions(self, mode, root, detailed=False, web_enabled=False):
+        self.say(f"模式: {MODE_LABELS[mode]} · 联网: {network_label(mode, web_enabled)}",
+                 style="bold red" if mode == Mode.DANGER_FULL else "green")
         self.say(f"工作区: {root}", style="green")
         if not detailed:
             return
@@ -113,7 +121,8 @@ class TerminalUI:
             self.say("工作区仅决定初始目录，不限制访问范围。/safe 切回隔离；不会自动使用 sudo。")
         else:
             self.say("工作区是真实可写目录（含隐藏文件），不是副本；工具可以删除其中的数据。")
-            self.say("命令仅挂载该目录与只读系统运行库，隔离网络；越界文件访问需单次确认。")
+            self.say("命令挂载工作区与只读运行文件；越界文件工具访问需单次确认。")
+            self.say("/web on 允许命令联网（含本机和局域网），可发送可读取的数据；/web off 关闭。")
 
     def confirm_danger(self, root):
         self.say("\n启用 DANGER-FULL", style="bold red")
@@ -122,7 +131,7 @@ class TerminalUI:
         self.say("仅当前会话，不授予 sudo。/safe 切回；已执行的修改不会撤销。")
         return self.prompt("为本会话启用？[y/N] ").lower() == "y"
 
-    def describe_tool(self, name, arguments, root, mode, outside):
+    def describe_tool(self, name, arguments, root, mode, outside, web_enabled=False):
         from rich.panel import Panel
         from rich.text import Text
         body = Text()
@@ -133,7 +142,8 @@ class TerminalUI:
 
         ]
         if name == "run_command":
-            rows += [("目录", str(root)), ("命令", arguments["command"])]
+            rows += [("目录", str(root)), ("联网权限", network_label(mode, web_enabled)),
+                     ("命令", arguments["command"])]
         else:
             rows += [("路径", arguments.get("path", ""))]
             if outside:

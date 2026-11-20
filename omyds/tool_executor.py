@@ -1,15 +1,44 @@
 """One result per call; permissions come only from the local conversation."""
 import copy
+import inspect
 import json
 from . import security
 from .permissions import Mode
+from .context import DEFAULT_MAX_CHARS, DEFAULT_HISTORY_TOOL_CHARS
+
+
+class ToolCompatibilityError(RuntimeError):
+    """A local installation mismatch, not a model/tool argument error."""
+
+
+def validate_tool_interfaces(tools):
+    """Check client-owned command flags before starting a model conversation."""
+    for tool in tools:
+        if tool.name != "run_command":
+            continue
+        try:
+            inspect.signature(tool.run).bind({}, host=False, network=False)
+        except (TypeError, ValueError) as exc:
+            source = inspect.getfile(type(tool))
+            raise ToolCompatibilityError(
+                "run_command 接口不匹配：需要 run(arguments, *, host=False, network=False)。\n"
+                f"实际加载: {source}\n"
+                "请完整覆盖 omyds/tools/run_command.py 与 omyds/tool_executor.py，"
+                "退出旧进程后，从项目根目录重新运行 uv run OmyDs。"
+                "不会忽略联网设置，也不会自动切换 danger-full。"
+            ) from exc
 
 
 class ToolExecutor:
     def __init__(self, tools, ui, mode=Mode.WORKSPACE):
         self.tools = {tool.name: tool for tool in tools}
+        validate_tool_interfaces(self.tools.values())
         self.ui = ui
         self.mode = mode
+        self.web_enabled = False
+        self.max_context_chars = DEFAULT_MAX_CHARS
+        self.history_tool_chars = DEFAULT_HISTORY_TOOL_CHARS
+        self.context_notice = None
         self.cancelled = False
 
     @property
@@ -67,12 +96,15 @@ class ToolExecutor:
                 outside or (self.mode == Mode.ASK and name in {"run_command", "write_file"})
             )
             # Display declared intent separately from facts determined by this client.
-            self.ui.describe_tool(name, arguments, security.ALLOWED_ROOT, self.mode, outside)
+            self.ui.describe_tool(name, arguments, security.ALLOWED_ROOT, self.mode, outside,
+                                  web_enabled=self.web_enabled)
             if needs_confirmation and not self.ui.confirm_tool(
                 name, arguments, security.ALLOWED_ROOT, outside=outside
             ):
                 return self.denied()
             tool_args = {k: v for k, v in arguments.items() if k not in {"purpose", "impact"}}
+            if name == "run_command" and not host:
+                return str(tool.run(tool_args, network=self.web_enabled))
             if host:
                 return str(tool.run(tool_args, host=True))
             if outside:
